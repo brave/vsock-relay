@@ -5,7 +5,7 @@
 
 use std::{io, sync::Arc};
 
-use agnostic::{shutdown_enclave_stream, EnclaveStream, DEFAULT_DEST_ADDR};
+use agnostic::{shutdown_enclave_stream, EnclaveAddr, EnclaveStream, DEFAULT_DEST_ADDR};
 use anyhow::{Context, Result};
 use bytes::BytesMut;
 use clap::{command, Parser};
@@ -17,7 +17,7 @@ use tokio::{
 use tracing::{debug, error, info, metadata::LevelFilter};
 use tracing_subscriber::EnvFilter;
 
-use crate::agnostic::connect_to_enclave;
+use crate::agnostic::{connect_to_enclave, parse_enclave_addr};
 
 #[cfg(not(feature = "mock-vsock"))]
 mod agnostic {
@@ -27,10 +27,11 @@ mod agnostic {
     use tokio_vsock::{VsockAddr, VsockStream};
 
     pub type EnclaveStream = VsockStream;
+    pub type EnclaveAddr = VsockAddr;
 
     pub const DEFAULT_DEST_ADDR: &str = "4:8443";
 
-    pub fn parse_vsock_addr(address: &str) -> Result<VsockAddr> {
+    pub fn parse_enclave_addr(address: &str) -> Result<EnclaveAddr> {
         let mut address_split = address.split(":");
         let cid = address_split
             .next()
@@ -43,9 +44,8 @@ mod agnostic {
         Ok(VsockAddr::new(cid, port))
     }
 
-    pub async fn connect_to_enclave(address: &str) -> Result<EnclaveStream> {
-        let addr = parse_vsock_addr(address)?;
-        Ok(VsockStream::connect(addr.cid(), addr.port()).await?)
+    pub async fn connect_to_enclave(address: EnclaveAddr) -> Result<EnclaveStream> {
+        Ok(VsockStream::connect(address.cid(), address.port()).await?)
     }
 
     pub async fn shutdown_enclave_stream(stream: &mut EnclaveStream) {
@@ -55,14 +55,21 @@ mod agnostic {
 
 #[cfg(feature = "mock-vsock")]
 mod agnostic {
-    use anyhow::Result;
+    use std::{net::SocketAddr, str::FromStr};
+
+    use anyhow::{Context, Result};
     use tokio::{io::AsyncWriteExt, net::TcpStream};
 
     pub type EnclaveStream = TcpStream;
+    pub type EnclaveAddr = SocketAddr;
 
     pub const DEFAULT_DEST_ADDR: &str = "127.0.0.1:9443";
 
-    pub async fn connect_to_enclave(address: &str) -> Result<EnclaveStream> {
+    pub fn parse_enclave_addr(address: &str) -> Result<EnclaveAddr> {
+        Ok(SocketAddr::from_str(address).context("error parsing destination address")?)
+    }
+
+    pub async fn connect_to_enclave(address: EnclaveAddr) -> Result<EnclaveStream> {
         Ok(TcpStream::connect(address).await?)
     }
 
@@ -102,10 +109,10 @@ struct RelayTask {
 impl RelayTask {
     pub async fn new(
         src_conn: TcpStream,
-        destination_address: &str,
+        dest_addr: EnclaveAddr,
         buffer_size: usize,
     ) -> Result<Self> {
-        let dest_conn = connect_to_enclave(&destination_address).await?;
+        let dest_conn = connect_to_enclave(dest_addr).await?;
         Ok(Self {
             src_conn,
             dest_conn,
@@ -170,6 +177,7 @@ async fn listen_and_serve(args: &Cli) -> Result<()> {
         .await
         .context("failed to start source listener")?;
     let conn_count_semaphore = Arc::new(Semaphore::new(args.max_concurrent_connections));
+    let destination_address = parse_enclave_addr(&args.destination_address)?;
     info!("Listening on tcp {}...", args.source_address);
 
     // Use semaphore to limit active connection count
@@ -177,14 +185,13 @@ async fn listen_and_serve(args: &Cli) -> Result<()> {
         match host_listener.accept().await {
             Ok((tcp_stream, _)) => {
                 let buf_size = args.buffer_size;
-                let destination_address = args.destination_address.clone();
 
                 // Spawn new task to handle connection, task will now own semaphore
                 // for the duration of the connection.
                 tokio::spawn(async move {
                     let result = async {
                         let task =
-                            RelayTask::new(tcp_stream, &destination_address, buf_size).await?;
+                            RelayTask::new(tcp_stream, destination_address, buf_size).await?;
                         task.run().await
                     };
                     if let Err(e) = result.await {
