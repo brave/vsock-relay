@@ -1,0 +1,16 @@
+[package]
+name = "vsock-relay"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+bytes = "1.4"
+clap = { version = "4.3", features = ["derive"] }
+tokio-vsock = "0.4"
+tokio = { version = "1.29", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+enclave-tcp = []
