@@ -19,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::agnostic::connect_to_enclave;
 
-#[cfg(not(feature = "enclave-tcp"))]
+#[cfg(not(feature = "mock-vsock"))]
 mod agnostic {
     use std::net::Shutdown;
 
@@ -53,7 +53,7 @@ mod agnostic {
     }
 }
 
-#[cfg(feature = "enclave-tcp")]
+#[cfg(feature = "mock-vsock")]
 mod agnostic {
     use anyhow::Result;
     use tokio::{io::AsyncWriteExt, net::TcpStream};
