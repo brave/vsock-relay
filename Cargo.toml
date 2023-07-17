@@ -1,6 +1,10 @@
 [package]
 name = "vsock-relay"
-version = "0.1.0"
+version = "1.0.0"
+description = "Relays TCP connections from IPv4/IPv6 to vsock."
+license = "MPL-2.0"
+homepage = "https://github.com/brave-experiments/vsock-relay"
+repository = "https://github.com/brave-experiments/vsock-relay"
 edition = "2021"
 
 [dependencies]
