@@ -3,7 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::{io, sync::Arc};
+use std::{io, net::SocketAddr, str::FromStr, sync::Arc};
 
 use agnostic::{shutdown_enclave_stream, EnclaveAddr, EnclaveStream, DEFAULT_DEST_ADDR};
 use anyhow::{Context, Result};
@@ -17,15 +17,16 @@ use tokio::{
 use tracing::{debug, error, info, metadata::LevelFilter};
 use tracing_subscriber::EnvFilter;
 
-use crate::agnostic::{connect_to_enclave, parse_enclave_addr};
+use crate::agnostic::{connect_to_enclave, get_enclave_listener, parse_enclave_addr};
 
 #[cfg(not(feature = "mock-vsock"))]
 mod agnostic {
     use std::net::Shutdown;
 
     use anyhow::{anyhow, Result};
-    use tokio_vsock::{VsockAddr, VsockStream};
+    use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
 
+    pub type EnclaveListener = VsockListener;
     pub type EnclaveStream = VsockStream;
     pub type EnclaveAddr = VsockAddr;
 
@@ -44,6 +45,10 @@ mod agnostic {
         Ok(VsockAddr::new(cid, port))
     }
 
+    pub async fn get_enclave_listener(address: EnclaveAddr) -> Result<EnclaveListener> {
+        Ok(VsockListener::bind(address.cid(), address.port())?)
+    }
+
     pub async fn connect_to_enclave(address: EnclaveAddr) -> Result<EnclaveStream> {
         Ok(VsockStream::connect(address.cid(), address.port()).await?)
     }
@@ -58,8 +63,12 @@ mod agnostic {
     use std::{net::SocketAddr, str::FromStr};
 
     use anyhow::{Context, Result};
-    use tokio::{io::AsyncWriteExt, net::TcpStream};
+    use tokio::{
+        io::AsyncWriteExt,
+        net::{TcpListener, TcpStream},
+    };
 
+    pub type EnclaveListener = TcpListener;
     pub type EnclaveStream = TcpStream;
     pub type EnclaveAddr = SocketAddr;
 
@@ -67,6 +76,10 @@ mod agnostic {
 
     pub fn parse_enclave_addr(address: &str) -> Result<EnclaveAddr> {
         Ok(SocketAddr::from_str(address).context("error parsing destination address")?)
+    }
+
+    pub async fn get_enclave_listener(address: EnclaveAddr) -> Result<EnclaveListener> {
+        Ok(TcpListener::bind(address).await?)
     }
 
     pub async fn connect_to_enclave(address: EnclaveAddr) -> Result<EnclaveStream> {
@@ -100,19 +113,19 @@ struct Cli {
 }
 
 struct RelayTask {
-    src_conn: TcpStream,
-    dest_conn: EnclaveStream,
+    src_conn: EnclaveStream,
+    dest_conn: TcpStream,
     src_rx_bytes: BytesMut,
     dest_rx_bytes: BytesMut,
 }
 
 impl RelayTask {
     pub async fn new(
-        src_conn: TcpStream,
-        dest_addr: EnclaveAddr,
+        src_conn: EnclaveStream,
+        dest_addr: SocketAddr,
         buffer_size: usize,
     ) -> Result<Self> {
-        let dest_conn = connect_to_enclave(dest_addr).await?;
+        let dest_conn = TcpStream::connect(dest_addr).await?;
         Ok(Self {
             src_conn,
             dest_conn,
@@ -122,8 +135,8 @@ impl RelayTask {
     }
 
     async fn shutdown(&mut self) {
-        self.src_conn.shutdown().await.ok();
-        shutdown_enclave_stream(&mut self.dest_conn).await;
+        self.dest_conn.shutdown().await.ok();
+        shutdown_enclave_stream(&mut self.src_conn).await;
     }
 
     async fn handle_rx_result(&mut self, rx_result: io::Result<usize>) -> Result<bool> {
@@ -173,12 +186,10 @@ impl RelayTask {
     }
 }
 async fn listen_and_serve(args: &Cli) -> Result<()> {
-    let host_listener = TcpListener::bind(&args.source_address)
-        .await
-        .context("failed to start source listener")?;
+    let mut host_listener = get_enclave_listener(parse_enclave_addr(&args.source_address)?).await?;
     let conn_count_semaphore = Arc::new(Semaphore::new(args.max_concurrent_connections));
-    let destination_address = parse_enclave_addr(&args.destination_address)?;
-    info!("Listening on tcp {}...", args.source_address);
+    let destination_address = SocketAddr::from_str(&args.destination_address)?;
+    info!("Listening on vsock {}...", args.source_address);
 
     // Use semaphore to limit active connection count
     while let Ok(semaphore_permit) = conn_count_semaphore.clone().acquire_owned().await {
