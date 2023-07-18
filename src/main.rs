@@ -32,7 +32,7 @@ mod agnostic {
     pub const DEFAULT_DEST_ADDR: &str = "4:8443";
 
     pub fn parse_enclave_addr(address: &str) -> Result<EnclaveAddr> {
-        let mut address_split = address.split(":");
+        let mut address_split = address.split(':');
         let cid = address_split
             .next()
             .ok_or(anyhow!("missing cid from vsock addr: {address}"))?
