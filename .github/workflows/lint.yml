@@ -22,7 +22,7 @@ jobs:
       - name: Toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Cache
-        uses: Swatinem/rust-cache@a22603398250b864f7190077025cf752307154dc # v2
+        uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84 # v2
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
