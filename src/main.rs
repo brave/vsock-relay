@@ -17,17 +17,18 @@ use tokio::{
 use tracing::{debug, error, info, metadata::LevelFilter};
 use tracing_subscriber::EnvFilter;
 
-use crate::agnostic::{connect_to_enclave, parse_enclave_addr};
+use crate::agnostic::{connect_to_enclave, listen_on_port, parse_enclave_addr};
 
 #[cfg(not(feature = "mock-vsock"))]
 mod agnostic {
     use std::net::Shutdown;
 
     use anyhow::{anyhow, Result};
-    use tokio_vsock::{VsockAddr, VsockStream};
+    use tokio_vsock::{VsockAddr, VsockListener, VsockStream, VMADDR_CID_ANY};
 
     pub type EnclaveStream = VsockStream;
     pub type EnclaveAddr = VsockAddr;
+    pub type EnclaveListener = VsockListener;
 
     pub const DEFAULT_DEST_ADDR: &str = "4:8443";
 
@@ -45,11 +46,18 @@ mod agnostic {
     }
 
     pub async fn connect_to_enclave(address: EnclaveAddr) -> Result<EnclaveStream> {
-        Ok(VsockStream::connect(address.cid(), address.port()).await?)
+        Ok(VsockStream::connect(address).await?)
     }
 
     pub async fn shutdown_enclave_stream(stream: &mut EnclaveStream) {
         stream.shutdown(Shutdown::Both).ok();
+    }
+
+    pub async fn listen_on_port(port: u16) -> Result<EnclaveListener> {
+        Ok(VsockListener::bind(VsockAddr::new(
+            VMADDR_CID_ANY,
+            port as u32,
+        ))?)
     }
 }
 
@@ -58,10 +66,14 @@ mod agnostic {
     use std::{net::SocketAddr, str::FromStr};
 
     use anyhow::{Context, Result};
-    use tokio::{io::AsyncWriteExt, net::TcpStream};
+    use tokio::{
+        io::AsyncWriteExt,
+        net::{TcpListener, TcpStream},
+    };
 
     pub type EnclaveStream = TcpStream;
     pub type EnclaveAddr = SocketAddr;
+    pub type EnclaveListener = TcpListener;
 
     pub const DEFAULT_DEST_ADDR: &str = "127.0.0.1:9443";
 
@@ -75,6 +87,10 @@ mod agnostic {
 
     pub async fn shutdown_enclave_stream(stream: &mut EnclaveStream) {
         stream.shutdown().await.ok();
+    }
+
+    pub async fn listen_on_port(port: u16) -> Result<EnclaveListener> {
+        Ok(TcpListener::bind(("0.0.0.0", port)).await?)
     }
 }
 
@@ -97,6 +113,11 @@ struct Cli {
     /// Maximum amount of allowed concurrent connections
     #[arg(short = 'c', long, default_value_t = 1250)]
     max_concurrent_connections: usize,
+
+    /// Use port & enable the host IP provider server, so the
+    /// enclave can detect the IP of the host
+    #[arg(long)]
+    host_ip_provider_port: Option<u16>,
 }
 
 struct RelayTask {
@@ -113,6 +134,7 @@ impl RelayTask {
         buffer_size: usize,
     ) -> Result<Self> {
         let dest_conn = connect_to_enclave(dest_addr).await?;
+
         Ok(Self {
             src_conn,
             dest_conn,
@@ -172,6 +194,36 @@ impl RelayTask {
         Ok(())
     }
 }
+
+async fn handle_host_ip_provider_conn(
+    mut stream: EnclaveStream,
+    host_ip_address: &str,
+) -> Result<()> {
+    stream.write_all(host_ip_address.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+async fn host_ip_provider_server(port: u16) -> Result<()> {
+    let host_ip_address = local_ip_address::local_ip()?.to_string();
+
+    let mut listener = listen_on_port(port).await?;
+    info!("Host IP provider listening on port {}", port);
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                if let Err(e) = handle_host_ip_provider_conn(stream, &host_ip_address).await {
+                    error!("error handling host ip request: {e}");
+                }
+            }
+            Err(e) => {
+                error!("error accepting host ip connection: {e}");
+            }
+        }
+    }
+}
+
 async fn listen_and_serve(args: &Cli) -> Result<()> {
     let host_listener = TcpListener::bind(&args.source_address)
         .await
@@ -218,6 +270,14 @@ async fn main() -> Result<()> {
                 .expect("should create tracing subscriber env filter"),
         )
         .init();
+
+    if let Some(port) = args.host_ip_provider_port {
+        tokio::spawn(async move {
+            if let Err(e) = host_ip_provider_server(port).await {
+                error!("host ip provider server error: {e}");
+            }
+        });
+    }
 
     listen_and_serve(&args).await
 }
