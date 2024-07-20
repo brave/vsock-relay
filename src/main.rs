@@ -13,6 +13,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::Semaphore,
+    task::JoinSet,
 };
 use tracing::{debug, error, info, metadata::LevelFilter};
 use tracing_subscriber::EnvFilter;
@@ -95,20 +96,25 @@ mod agnostic {
 }
 
 /// Relays TCP connections from IPV4/IPV6 to VSOCK.
-#[derive(Parser, Debug)]
+#[derive(Clone, Parser, Debug)]
 #[command(version)]
 struct Cli {
     /// Buffer size to use when reading/writing data between peers
     #[arg(long, default_value_t = 8192)]
     buffer_size: usize,
 
-    /// IPV4/IPV6 address/port to listen on
-    #[arg(short = 's', long, default_value = "0.0.0.0:8443")]
-    source_address: String,
+    /// IPV4/IPV6 addresses/ports to listen on (comma separated)
+    #[arg(
+        short = 's',
+        long,
+        default_value = "0.0.0.0:8443",
+        value_delimiter = ','
+    )]
+    source_addresses: Vec<String>,
 
-    /// VSOCK address/port to connect to
-    #[arg(short = 'l', long, default_value = DEFAULT_DEST_ADDR)]
-    destination_address: String,
+    /// VSOCK addresses/ports to connect to (comma separated)
+    #[arg(short = 'd', long, default_value = DEFAULT_DEST_ADDR, value_delimiter=',')]
+    destination_addresses: Vec<String>,
 
     /// Maximum amount of allowed concurrent connections
     #[arg(short = 'c', long, default_value_t = 1250)]
@@ -224,13 +230,17 @@ async fn host_ip_provider_server(port: u16) -> Result<()> {
     }
 }
 
-async fn listen_and_serve(args: &Cli) -> Result<()> {
-    let host_listener = TcpListener::bind(&args.source_address)
+async fn listen_and_serve(
+    source_address: String,
+    destination_address: String,
+    args: Cli,
+) -> Result<()> {
+    let host_listener = TcpListener::bind(&source_address)
         .await
         .context("failed to start source listener")?;
     let conn_count_semaphore = Arc::new(Semaphore::new(args.max_concurrent_connections));
-    let destination_address = parse_enclave_addr(&args.destination_address)?;
-    info!("Listening on tcp {}...", args.source_address);
+    let destination_address = parse_enclave_addr(&destination_address)?;
+    info!("Listening on tcp {}...", source_address);
 
     // Use semaphore to limit active connection count
     while let Ok(semaphore_permit) = conn_count_semaphore.clone().acquire_owned().await {
@@ -262,6 +272,12 @@ async fn listen_and_serve(args: &Cli) -> Result<()> {
 async fn main() -> Result<()> {
     let args = Cli::parse();
 
+    assert_eq!(
+        args.source_addresses.len(),
+        args.destination_addresses.len(),
+        "amount of source and destination addresses must match"
+    );
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::builder()
@@ -279,5 +295,22 @@ async fn main() -> Result<()> {
         });
     }
 
-    listen_and_serve(&args).await
+    let mut join_set = args
+        .source_addresses
+        .clone()
+        .into_iter()
+        .zip(args.destination_addresses.clone().into_iter())
+        .map(|(source_address, destination_address)| {
+            let args = args.clone();
+            tokio::spawn(async move {
+                listen_and_serve(
+                    source_address.to_string(),
+                    destination_address.to_string(),
+                    args,
+                )
+                .await
+            })
+        })
+        .collect::<JoinSet<_>>();
+    join_set.join_next().await.unwrap().unwrap().unwrap()
 }
