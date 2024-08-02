@@ -116,7 +116,8 @@ struct Cli {
     #[arg(short = 'd', long, default_value = DEFAULT_DEST_ADDR, value_delimiter=',')]
     destination_addresses: Vec<String>,
 
-    /// Maximum amount of allowed concurrent connections
+    /// Maximum amount of allowed concurrent connections.
+    /// The limit will be enforced separately for each source/destination pair.
     #[arg(short = 'c', long, default_value_t = 1250)]
     max_concurrent_connections: usize,
 
@@ -272,6 +273,10 @@ async fn listen_and_serve(
 async fn main() -> Result<()> {
     let args = Cli::parse();
 
+    assert!(
+        !args.source_addresses.is_empty(),
+        "at least one source/destination pair must be defined"
+    );
     assert_eq!(
         args.source_addresses.len(),
         args.destination_addresses.len(),
@@ -295,22 +300,28 @@ async fn main() -> Result<()> {
         });
     }
 
-    let mut join_set = args
+    let mut join_set = JoinSet::new();
+    for (source_address, destination_address) in args
         .source_addresses
         .clone()
         .into_iter()
         .zip(args.destination_addresses.clone().into_iter())
-        .map(|(source_address, destination_address)| {
-            let args = args.clone();
-            tokio::spawn(async move {
-                listen_and_serve(
-                    source_address.to_string(),
-                    destination_address.to_string(),
-                    args,
-                )
-                .await
-            })
-        })
-        .collect::<JoinSet<_>>();
-    join_set.join_next().await.unwrap().unwrap().unwrap()
+    {
+        let args = args.clone();
+        join_set.spawn(async move {
+            listen_and_serve(
+                source_address.to_string(),
+                destination_address.to_string(),
+                args,
+            )
+            .await
+        });
+    }
+    let result = join_set
+        .join_next()
+        .await
+        .expect("join set should not be empty")
+        .expect("async task should not result in join error");
+    join_set.shutdown().await;
+    result
 }
