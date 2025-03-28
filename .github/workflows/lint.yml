@@ -20,7 +20,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4
       - name: Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: rustup default stable
       - name: Cache
         uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84 # v2
       - name: Format
