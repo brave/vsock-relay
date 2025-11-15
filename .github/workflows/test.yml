@@ -12,6 +12,9 @@ on:
   schedule:
     - cron: '18 7 3 * *'
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
